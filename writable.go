@@ -4,14 +4,18 @@ import "io"
 import "encoding/binary"
 
 type Writable interface {
-	Write(w io.Writer) error
+	Write(w io.Writer) (int, error)
 	Read(r io.Reader) error
 }
 
 type IntWritable int32
 
-func (self IntWritable) Write(w io.Writer) error {
-	return binary.Write(w, binary.BigEndian, self)
+func (self *IntWritable) Write(w io.Writer) (int, error) {
+	err := binary.Write(w, binary.BigEndian, self)
+	if err != nil {
+		return 0, err
+	}
+	return 4, nil
 }
 
 func (self *IntWritable) Read(r io.Reader) error {
@@ -20,8 +24,12 @@ func (self *IntWritable) Read(r io.Reader) error {
 
 type LongWritable int64
 
-func (self LongWritable) Write(w io.Writer) error {
-	return binary.Write(w, binary.BigEndian, self)
+func (self *LongWritable) Write(w io.Writer) (int, error) {
+	err := binary.Write(w, binary.BigEndian, self)
+	if err != nil {
+		return 0, err
+	}
+	return 8, nil
 }
 
 func (self *LongWritable) Read(r io.Reader) error {
@@ -32,8 +40,13 @@ type TextWritable struct {
 	Buf []byte
 }
 
-func (self TextWritable) Write(w io.Writer) error {
-	return nil /* TODO */
+func (self *TextWritable) Write(w io.Writer) (int, error) {
+	nn1, err := WriteVLong(w, int64(len(self.Buf)))
+	if err != nil {
+		return 0, err
+	}
+	nn2, err := w.Write(self.Buf)
+	return nn1 + nn2, err
 }
 
 func (self *TextWritable) Read(r io.Reader) error {
@@ -56,15 +69,19 @@ type BytesWritable struct {
 	Buf []byte
 }
 
-func (self BytesWritable) Write(w io.Writer) error {
+func (self *BytesWritable) Write(w io.Writer) (int, error) {
 	if self.Buf == nil {
-		return binary.Write(w, binary.BigEndian, int32(0))
+		err := binary.Write(w, binary.BigEndian, int32(0))
+		if err != nil {
+			return 0, err
+		}
+		return 4, nil
 	} else {
 		if err := binary.Write(w, binary.BigEndian, int32(len(self.Buf))); err != nil {
-			return err
+			return 0, err
 		}
-		_, err := w.Write(self.Buf)
-		return err
+		nn, err := w.Write(self.Buf)
+		return nn + 4, err
 	}
 }
 

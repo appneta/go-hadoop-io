@@ -1,6 +1,10 @@
 package hadoop
 
-import "io"
+import (
+	"crypto/rand"
+	"io"
+)
+
 import "fmt"
 import "bytes"
 
@@ -8,13 +12,15 @@ var SEQ_MAGIC = []byte("SEQ")
 
 const SYNC_HASH_SIZE = 16
 
+const BLOCK_SIZE_MIN = 1 << 20 // Corresponds roughly to io.seqfile.compress.blocksize
+
 const (
 	VERSION_BLOCK_COMPRESS  = 4
 	VERSION_CUSTOM_COMPRESS = 5
 	VERSION_WITH_METADATA   = 6
 )
 
-type sequenceFileBlock struct {
+type sequenceFileReaderBlock struct {
 	numRecords     int
 	numReadRecords int
 	keyReader      io.Reader
@@ -26,7 +32,23 @@ type sequenceFileBlock struct {
 type SequenceFileReader struct {
 	sync   []byte
 	reader io.Reader
-	block  *sequenceFileBlock
+	block  *sequenceFileReaderBlock
+	codec  Codec
+}
+
+type sequenceFileWriterBlock struct {
+	parent         *SequenceFileWriter
+	numRecords     int
+	keyBuffer      bytes.Buffer
+	keyLenBuffer   bytes.Buffer
+	valueBuffer    bytes.Buffer
+	valueLenBuffer bytes.Buffer
+}
+
+type SequenceFileWriter struct {
+	sync   []byte
+	writer io.Writer
+	block  *sequenceFileWriterBlock
 	codec  Codec
 }
 
@@ -125,7 +147,7 @@ func NewSequenceFileReader(r io.Reader) (*SequenceFileReader, error) {
 	}, nil
 }
 
-func (self *SequenceFileReader) readBlock() (*sequenceFileBlock, error) {
+func (self *SequenceFileReader) readBlock() (*sequenceFileReaderBlock, error) {
 	if self.sync != nil {
 		ReadInt(self.reader)
 		var sync [SYNC_HASH_SIZE]byte
@@ -199,7 +221,7 @@ func (self *SequenceFileReader) readBlock() (*sequenceFileBlock, error) {
 	// pos, _ := fp.Seek(0, os.SEEK_CUR)
 	// fmt.Println(pos)
 
-	return &sequenceFileBlock{
+	return &sequenceFileReaderBlock{
 		numRecords:     int(numRecords),
 		keyReader:      bytes.NewReader(keyReader),
 		keyLenReader:   bytes.NewReader(keyLenReader),
@@ -208,7 +230,7 @@ func (self *SequenceFileReader) readBlock() (*sequenceFileBlock, error) {
 	}, nil
 }
 
-func (block *sequenceFileBlock) Close() error {
+func (block *sequenceFileReaderBlock) Close() error {
 	return nil
 }
 
@@ -243,16 +265,195 @@ func (self *SequenceFileReader) Read(key Writable, value Writable) error {
 	return nil
 }
 
-func (block *sequenceFileBlock) isEof() bool {
+func (block *sequenceFileReaderBlock) isEof() bool {
 	return block.numReadRecords >= block.numRecords
 }
 
-func (block *sequenceFileBlock) read(key Writable, value Writable) error {
+func (block *sequenceFileReaderBlock) read(key Writable, value Writable) error {
 	if block.isEof() {
 		return io.EOF
 	}
 	key.Read(block.keyReader)
 	value.Read(block.valueReader)
 	block.numReadRecords++
+	return nil
+}
+
+type SequenceFileWriterOpts struct {
+	KeyClassName     string
+	ValueClassName   string
+	CompressionCodec string
+}
+
+func NewSequenceFileWriter(w io.Writer, opts *SequenceFileWriterOpts) (*SequenceFileWriter, error) {
+	if _, err := w.Write(SEQ_MAGIC[:]); err != nil {
+		return nil, err
+	}
+	var version = [...]byte{VERSION_CUSTOM_COMPRESS}
+	if _, err := w.Write(version[:]); err != nil {
+		return nil, err
+	}
+
+	var keyClassName TextWritable
+	if opts.KeyClassName == "" {
+		keyClassName.Buf = []byte("org.apache.hadoop.io.Text")
+	} else {
+		keyClassName.Buf = []byte(opts.KeyClassName)
+	}
+	var valueClassName TextWritable
+	if opts.KeyClassName == "" {
+		valueClassName.Buf = []byte("org.apache.hadoop.io.BytesWritable")
+	} else {
+		valueClassName.Buf = []byte(opts.KeyClassName)
+	}
+	keyClassName.Write(w)
+	valueClassName.Write(w)
+
+	// uncompressed not supported yet
+
+	var compressed = true
+	var err error
+	err = WriteBoolean(w, compressed)
+	if err != nil {
+		return nil, err
+	}
+
+	var blockCompressed = true
+	err = WriteBoolean(w, blockCompressed)
+	if err != nil {
+		return nil, err
+	}
+
+	var codec Codec
+	var codecName string
+	if opts.CompressionCodec == "" {
+		codecName = "org.apache.hadoop.io.compress.DefaultCodec"
+	} else {
+		codecName = opts.CompressionCodec
+	}
+	var ok bool
+	codec, ok = Codecs[codecName]
+	if !ok {
+		return nil, fmt.Errorf("unsupported codec")
+	}
+	var codecClassName TextWritable
+	codecClassName.Buf = []byte(codecName)
+	codecClassName.Write(w)
+
+	// metadata not supported yet
+
+	sync := make([]byte, SYNC_HASH_SIZE)
+	_, err = rand.Read(sync)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := w.Write(sync); err != nil {
+		return nil, err
+	}
+
+	return &SequenceFileWriter{
+		sync:   sync,
+		writer: w,
+		codec:  codec,
+	}, nil
+}
+
+func (block *sequenceFileWriterBlock) Close() error {
+	if block.numRecords == 0 {
+		return nil
+	}
+
+	if block.parent.sync != nil {
+		WriteInt(block.parent.writer, -1) // XXX what is this???
+		if _, err := block.parent.writer.Write(block.parent.sync); err != nil {
+			return err
+		}
+	}
+
+	_, err := WriteVLong(block.parent.writer, int64(block.numRecords))
+	if err != nil {
+		return err
+	}
+
+	buffers := []*bytes.Buffer{
+		&block.keyLenBuffer,
+		&block.keyBuffer,
+		&block.valueLenBuffer,
+		&block.valueBuffer,
+	}
+
+	for _, buffer := range buffers {
+		compressedBuf, err := block.parent.codec.Compress(nil, buffer.Bytes())
+		if err != nil {
+			return err
+		}
+		_, err = WriteBuffer(block.parent.writer, compressedBuf)
+		if err != nil {
+			return err
+		}
+	}
+
+	block.numRecords = 0
+	block.keyLenBuffer.Reset()
+	block.keyBuffer.Reset()
+	block.valueLenBuffer.Reset()
+	block.valueBuffer.Reset()
+	return nil
+}
+
+func (self *SequenceFileWriter) Close() error {
+	if self.block != nil {
+		err := self.block.Close()
+		self.block = nil
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (self *SequenceFileWriter) Write(key Writable, value Writable) error {
+	for self.block == nil || self.block.isBigEnough() {
+		if self.block != nil {
+			err := self.block.Close()
+			if err != nil {
+				return err
+			}
+		}
+		self.block = &sequenceFileWriterBlock{
+			parent: self,
+		}
+	}
+
+	err := self.block.write(key, value)
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (block *sequenceFileWriterBlock) isBigEnough() bool {
+	totalbytes := block.keyLenBuffer.Len() + block.keyBuffer.Len() + block.valueLenBuffer.Len() + block.valueBuffer.Len()
+	return totalbytes >= BLOCK_SIZE_MIN
+}
+
+func (block *sequenceFileWriterBlock) write(key Writable, value Writable) error {
+	nn, err := key.Write(&block.keyBuffer)
+	if err != nil {
+		return err
+	}
+	_, err = WriteVLong(&block.keyLenBuffer, int64(nn))
+	if err != nil {
+		return err
+	}
+	nn, err = value.Write(&block.valueBuffer)
+	if err != nil {
+		return err
+	}
+	_, err = WriteVLong(&block.valueLenBuffer, int64(nn))
+	if err != nil {
+		return err
+	}
+	block.numRecords++
 	return nil
 }

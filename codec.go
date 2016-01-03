@@ -51,14 +51,24 @@ func (c *ZlibCodec) Uncompress(dst, src []byte) ([]byte, error) {
 }
 
 func (c *ZlibCodec) Compress(dst, src []byte) ([]byte, error) {
-	panic("")
+	var buf bytes.Buffer
+	writer := zlib.NewWriter(&buf)
+	_, err := writer.Write(src)
+	if err != nil {
+		return nil, err
+	}
+	err = writer.Close()
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 type Bzip2Codec struct {
 }
 
 func (c *Bzip2Codec) Compress(dst, src []byte) ([]byte, error) {
-	panic("")
+	panic("Bzip2Codec Compress not implemented")
 }
 
 func (c *Bzip2Codec) Uncompress(dst, src []byte) ([]byte, error) {
@@ -84,7 +94,7 @@ type Lz4Codec struct {
 }
 
 func (c *Lz4Codec) Compress(dst, src []byte) ([]byte, error) {
-	panic("")
+	panic("Lz4Codec Compress not implemented")
 }
 
 func lz4DecompressSafe(in, out []byte) (int, error) {
