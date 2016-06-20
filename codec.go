@@ -1,19 +1,13 @@
 package hadoop
 
-// #cgo LDFLAGS: -llz4
 // #cgo CFLAGS: -O3
-// #include "lz4.h"
 import "C"
 
 import (
 	"bytes"
+	"compress/bzip2"
 	"compress/zlib"
-	"encoding/binary"
-	"errors"
 	"io"
-	"unsafe"
-
-	"github.com/eiiches/go-bzip2"
 )
 
 var (
@@ -72,10 +66,7 @@ func (c *Bzip2Codec) Compress(dst, src []byte) ([]byte, error) {
 }
 
 func (c *Bzip2Codec) Uncompress(dst, src []byte) ([]byte, error) {
-	reader, err := bzip2.NewReader(bytes.NewReader(src))
-	if err != nil {
-		return nil, err
-	}
+	reader := bzip2.NewReader(bytes.NewReader(src))
 	var buf [512]byte
 	for {
 		n, err := reader.Read(buf[:])
@@ -97,34 +88,35 @@ func (c *Lz4Codec) Compress(dst, src []byte) ([]byte, error) {
 	panic("Lz4Codec Compress not implemented")
 }
 
-func lz4DecompressSafe(in, out []byte) (int, error) {
-	n := int(C.LZ4_decompress_safe((*C.char)(unsafe.Pointer(&in[0])), (*C.char)(unsafe.Pointer(&out[0])), C.int(len(in)), C.int(len(out))))
-	if n < 0 {
-		return 0, errors.New("corrupt input")
-	}
-	return n, nil
-}
+// func lz4DecompressSafe(in, out []byte) (int, error) {
+// 	n := int(C.LZ4_decompress_safe((*C.char)(unsafe.Pointer(&in[0])), (*C.char)(unsafe.Pointer(&out[0])), C.int(len(in)), C.int(len(out))))
+// 	if n < 0 {
+// 		return 0, errors.New("corrupt input")
+// 	}
+// 	return n, nil
+// }
 
 func (c *Lz4Codec) Uncompress(dst, src []byte) ([]byte, error) {
-	var iptr, optr uint
+	panic("Lz4Codec Uncompress has been disabled / commented out")
+	// var iptr, optr uint
 
-	osize := uint(binary.BigEndian.Uint32(src[0:]))
-	iptr += 4
-	out := make([]byte, osize)
+	// osize := uint(binary.BigEndian.Uint32(src[0:]))
+	// iptr += 4
+	// out := make([]byte, osize)
 
-	for optr < osize {
-		iblocksize := uint(binary.BigEndian.Uint32(src[iptr:]))
-		iptr += 4
+	// for optr < osize {
+	// 	iblocksize := uint(binary.BigEndian.Uint32(src[iptr:]))
+	// 	iptr += 4
 
-		n, err := lz4DecompressSafe(src[iptr:iptr+iblocksize], out[optr:])
-		if err != nil {
-			return nil, err
-		}
-		optr += uint(n)
-		iptr += iblocksize
-	}
+	// 	n, err := lz4DecompressSafe(src[iptr:iptr+iblocksize], out[optr:])
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// 	optr += uint(n)
+	// 	iptr += iblocksize
+	// }
 
-	return out, nil
+	// return out, nil
 }
 
 type SnappyCodec struct {
